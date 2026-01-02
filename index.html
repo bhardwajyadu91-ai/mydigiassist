@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Assistant Pro</title>
+    
+    <link rel="manifest" href="manifest.json">
+    
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/dexie@latest/dist/dexie.js"></script>
+    <link href="https://unpkg.com/tabulator-tables@5.5.0/dist/css/tabulator_modern.min.css" rel="stylesheet">
+    <script type="text/javascript" src="https://unpkg.com/tabulator-tables@5.5.0/dist/js/tabulator.min.js"></script>
+
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f2f5; padding: 20px; display: flex; justify-content: center; }
+        .app-container { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 700px; }
+        h2, h3 { color: #1a73e8; margin-top: 0; }
+        .status-badge { font-size: 0.8em; padding: 4px 8px; border-radius: 20px; font-weight: bold; }
+        input, select, textarea { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 10px; transition: 0.3s; }
+        .btn-save { background-color: #1a73e8; color: white; }
+        .btn-sync { background-color: #34a853; color: white; }
+        .btn-clear { background-color: #80868b; color: white; font-size: 0.8em; padding: 8px; width: auto; }
+        .btn-refresh { background-color: #673ab7; color: white; margin-bottom: 10px; }
+        .btn-delete { background-color: #ea4335; color: white; width: auto; padding: 5px 10px; font-size: 0.8em; }
+        ul { list-style: none; padding: 0; margin-top: 20px; }
+        li { background: #f8f9fa; padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; border-radius: 6px; margin-bottom: 5px; }
+        #sheet-table { margin-top: 15px; border: 1px solid #ccc; border-radius: 8px; font-size: 0.9em; }
+        .controls-row { display: flex; gap: 10px; margin-bottom: 10px; }
+        .footer-text { font-size: 0.8em; color: #666; text-align: center; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+<div id="app" class="app-container">
+    <h2>My Assistant 
+        <span class="status-badge" :style="{ backgroundColor: isOnline ? '#e6f4ea' : '#fce8e6', color: isOnline ? '#137333' : '#c5221f' }">
+            {{ isOnline ? '● Online' : '● Offline' }}
+        </span>
+    </h2>
+
+    <input v-model="formData.date" type="date">
+    <input v-model="formData.name" placeholder="Enter Full Name">
+    
+    <select v-model="formData.cat">
+        <option value="" disabled>Select Category</option>
+        <option v-for="cat in categories" :key="cat" :value="cat">{{ cat }}</option>
+    </select>
+
+    <textarea v-model="formData.detail" placeholder="Enter Detail"></textarea>
+
+    <button class="btn-save" @click="saveToLocal">Save Locally</button>
+   
+
+    <hr>
+    <h3>Local Pending ({{ totalCount }})</h3>
+    <ul> 
+        <li v-for="user in lastThreeEntries" :key="user.id">
+            <div>
+                <strong>{{ user.name }}</strong> ({{ formatDate(user.date) }})<br>
+                <small>{{ user.cat }}: {{ user.detail }}</small>
+            </div>
+            <button class="btn-delete" @click="deleteEntry(user.id)">Delete</button>
+        </li>
+    </ul>
+
+    <hr>
+
+    <button class="btn-sync" @click="handleSync" :disabled="isSyncing || !isOnline" :style="{ opacity: (isSyncing || !isOnline) ? 0.5 : 1 }">
+        {{ isSyncing ? 'Syncing...' : 'Sync to Google Sheets' }}
+    </button>
+
+    <h3>Cloud Data Explorer</h3>
+    <button class="btn-refresh" @click="fetchCloudData" :disabled="!isOnline">Refresh Cloud Data</button>
+    
+    <div class="controls-row">
+        <input type="text" id="search-input" placeholder="Search data..." style="margin:0; flex:2;">
+        <select id="pivot-select" style="margin:0; flex:1;">
+            <option value="">No Pivot</option>
+            <option value="cat">By Category</option>
+            <option value="name">By Name</option>
+        </select>
+        <button class="btn-clear" @click="clearFilters">Clear All</button>
+    </div>
+
+    
+    <div id="sheet-table"></div>
+</div>
+
+<script>
+    const { createApp, ref, reactive, onMounted } = Vue;
+
+    const db = new Dexie("MyOfflineApp");
+    db.version(8).stores({ 
+        users: '++id, date, name, detail, cat',
+        cloudCache: '++id, date, name, detail, cat'
+    });
+
+    createApp({
+        setup() {
+            const GOOGLE_URL = "https://script.google.com/macros/s/AKfycbzZ1idagx-tTUDwNRaHbV0AEyPC5BtsJyRwxA0AoHGtqOqnX22GuVnoFoPNBSp3Bps/exec"; 
+            const isOnline = ref(navigator.onLine);
+            const isSyncing = ref(false);
+            const categories = ref(['Office', 'Job', 'Personal']);
+            const formData = reactive({ date: new Date().toISOString().split('T')[0], name: '', detail: '', cat: '' });
+            const lastThreeEntries = ref([]);
+            const totalCount = ref(0);
+            let tableInstance = null;
+
+            // Helper for DD-MM-YYYY
+            const formatDate = (dateStr) => {
+                if (!dateStr) return "";
+                const d = new Date(dateStr);
+                const day = String(d.getDate()).padStart(2, '0');
+                const month = String(d.getMonth() + 1).padStart(2, '0');
+                const year = d.getFullYear();
+                return `${day}-${month}-${year}`;
+            };
+
+            const refreshUI = async () => {
+                lastThreeEntries.value = await db.users.orderBy('id').reverse().limit(3).toArray();
+                totalCount.value = await db.users.count();
+            };
+
+            const saveToLocal = async () => {
+                if(!formData.date || !formData.name || !formData.cat) return alert("Fill required fields!");
+                await db.users.add({ ...formData });
+                formData.name = ''; formData.detail = '';
+                await refreshUI();
+            };
+
+            const deleteEntry = async (id) => {
+                if(confirm("Delete this?")) { await db.users.delete(id); await refreshUI(); }
+            };
+
+            const renderTable = (data) => {
+                tableInstance = new Tabulator("#sheet-table", {
+                    data: data,
+                    layout: "fitColumns",
+                    pagination: "local",
+                    paginationSize: 10,
+                    groupHeader: (value, count) => `${value} (${count} entries)`,
+                    columns: [
+                        {title: "Date", field: "date", sorter: "date", formatter: (cell) => formatDate(cell.getValue())},
+                        {title: "Name", field: "name", widthGrow: 1},
+                        {title: "Category", field: "cat", width: 100},
+                        {title: "Detail", field: "detail", widthGrow: 2},
+                    ],
+                });
+
+                document.getElementById("search-input").addEventListener("keyup", (e) => {
+                    tableInstance.setFilter([
+                        [{field: "name", type: "like", value: e.target.value},
+                         {field: "detail", type: "like", value: e.target.value},
+                         {field: "cat", type: "like", value: e.target.value}]
+                    ]);
+                });
+
+                document.getElementById("pivot-select").addEventListener("change", (e) => {
+                    tableInstance.setGroupBy(e.target.value);
+                });
+            };
+
+            const fetchCloudData = async () => {
+                const cached = await db.cloudCache.toArray();
+                if (cached.length > 0) renderTable(cached);
+
+                if (navigator.onLine) {
+                    try {
+                        const res = await fetch(GOOGLE_URL);
+                        const data = await res.json();
+                        await db.cloudCache.clear();
+                        await db.cloudCache.bulkAdd(data);
+                        renderTable(data);
+                    } catch (e) { console.error(e); }
+                }
+            };
+
+            const handleSync = async () => {
+                const allData = await db.users.toArray();
+                if (allData.length === 0) return;
+                isSyncing.value = true;
+                try {
+                    await fetch(GOOGLE_URL, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        body: JSON.stringify({ token: "MeraSecretKey123", data: allData })
+                    });
+                    await db.users.clear();
+                    await refreshUI();
+                    await fetchCloudData();
+                    alert("Synced Successfully!");
+                } catch (error) { alert("Sync Error"); }
+                finally { isSyncing.value = false; }
+            };
+
+            const clearFilters = () => {
+                if (tableInstance) {
+                    tableInstance.clearFilter();
+                    tableInstance.setGroupBy("");
+                    document.getElementById("search-input").value = "";
+                    document.getElementById("pivot-select").value = "";
+                }
+            };
+
+            onMounted(async () => {
+                await refreshUI();
+                await fetchCloudData();
+                window.addEventListener('online', () => { isOnline.value = true; fetchCloudData(); });
+                window.addEventListener('offline', () => isOnline.value = false);
+            });
+
+            return { formData, categories, isOnline, isSyncing, lastThreeEntries, totalCount, saveToLocal, deleteEntry, handleSync, fetchCloudData, formatDate, clearFilters };
+        }
+    }).mount('#app');
+
+    if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(err => console.log(err));
+    });
+}
+</script>
+</body>
+</html>
