@@ -14,7 +14,7 @@
 
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f2f5; padding: 20px; display: flex; justify-content: center; }
-        .app-container { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 700px; }
+        .app-container { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 750px; }
         h2, h3 { color: #1a73e8; margin-top: 0; }
         .status-badge { font-size: 0.8em; padding: 4px 8px; border-radius: 20px; font-weight: bold; }
         input, select, textarea { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
@@ -28,7 +28,11 @@
         li { background: #f8f9fa; padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; border-radius: 6px; margin-bottom: 5px; }
         #sheet-table { margin-top: 15px; border: 1px solid #ccc; border-radius: 8px; font-size: 0.9em; }
         .controls-row { display: flex; gap: 10px; margin-bottom: 10px; }
-        .footer-text { font-size: 0.8em; color: #666; text-align: center; margin-top: 10px; }
+        
+        /* Modal Style */
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); display: flex; justify-content: center; align-items: center; z-index: 2000; }
+        .modal-content { background: white; padding: 25px; border-radius: 12px; width: 90%; max-width: 500px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+        .modal-body { white-space: pre-wrap; word-wrap: break-word; margin: 20px 0; color: #333; line-height: 1.6; max-height: 400px; overflow-y: auto; }
     </style>
 </head>
 <body>
@@ -51,7 +55,6 @@
     <textarea v-model="formData.detail" placeholder="Enter Detail"></textarea>
 
     <button class="btn-save" @click="saveToLocal">Save Locally</button>
-   
 
     <hr>
     <h3>Local Pending ({{ totalCount }})</h3>
@@ -84,8 +87,15 @@
         <button class="btn-clear" @click="clearFilters">Clear All</button>
     </div>
 
-    
     <div id="sheet-table"></div>
+
+    <div v-if="modal.show" class="modal-overlay" @click.self="closeModal">
+        <div class="modal-content">
+            <h3>Full Details</h3>
+            <div class="modal-body">{{ modal.content }}</div>
+            <button class="btn-clear" @click="closeModal">Close</button>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -106,16 +116,15 @@
             const formData = reactive({ date: new Date().toISOString().split('T')[0], name: '', detail: '', cat: '' });
             const lastThreeEntries = ref([]);
             const totalCount = ref(0);
+            
+            // Modal state
+            const modal = reactive({ show: false, content: '' });
             let tableInstance = null;
 
-            // Helper for DD-MM-YYYY
             const formatDate = (dateStr) => {
                 if (!dateStr) return "";
                 const d = new Date(dateStr);
-                const day = String(d.getDate()).padStart(2, '0');
-                const month = String(d.getMonth() + 1).padStart(2, '0');
-                const year = d.getFullYear();
-                return `${day}-${month}-${year}`;
+                return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
             };
 
             const refreshUI = async () => {
@@ -131,8 +140,11 @@
             };
 
             const deleteEntry = async (id) => {
-                if(confirm("Delete this?")) { await db.users.delete(id); await refreshUI(); }
+                if(confirm("Delete this pending item?")) { await db.users.delete(id); await refreshUI(); }
             };
+
+            const openModal = (text) => { modal.content = text; modal.show = true; };
+            const closeModal = () => { modal.show = false; };
 
             const renderTable = (data) => {
                 tableInstance = new Tabulator("#sheet-table", {
@@ -140,12 +152,18 @@
                     layout: "fitColumns",
                     pagination: "local",
                     paginationSize: 10,
-                    groupHeader: (value, count) => `${value} (${count} entries)`,
                     columns: [
                         {title: "Date", field: "date", sorter: "date", formatter: (cell) => formatDate(cell.getValue())},
                         {title: "Name", field: "name", widthGrow: 1},
                         {title: "Category", field: "cat", width: 100},
-                        {title: "Detail", field: "detail", widthGrow: 2},
+                        {
+                            title: "Detail (View)", 
+                            field: "detail", 
+                            widthGrow: 2,
+                            headerSort: false,
+                            formatter: (cell) => `<span style="color:#1a73e8; cursor:pointer;">🔍 View Full</span>`,
+                            cellClick: (e, cell) => openModal(cell.getData().detail)
+                        },
                     ],
                 });
 
@@ -166,14 +184,14 @@
                 const cached = await db.cloudCache.toArray();
                 if (cached.length > 0) renderTable(cached);
 
-                if (navigator.onLine) {
+                if (isOnline.value) {
                     try {
                         const res = await fetch(GOOGLE_URL);
                         const data = await res.json();
                         await db.cloudCache.clear();
                         await db.cloudCache.bulkAdd(data);
                         renderTable(data);
-                    } catch (e) { console.error(e); }
+                    } catch (e) { console.error("Fetch error:", e); }
                 }
             };
 
@@ -184,7 +202,7 @@
                 try {
                     await fetch(GOOGLE_URL, {
                         method: 'POST',
-                        mode: 'no-cors',
+                        mode: 'no-cors', // Kept for safety against CORS
                         body: JSON.stringify({ token: "MeraSecretKey123", data: allData })
                     });
                     await db.users.clear();
@@ -211,15 +229,9 @@
                 window.addEventListener('offline', () => isOnline.value = false);
             });
 
-            return { formData, categories, isOnline, isSyncing, lastThreeEntries, totalCount, saveToLocal, deleteEntry, handleSync, fetchCloudData, formatDate, clearFilters };
+            return { formData, categories, isOnline, isSyncing, lastThreeEntries, totalCount, modal, openModal, closeModal, saveToLocal, deleteEntry, handleSync, fetchCloudData, formatDate, clearFilters };
         }
     }).mount('#app');
-
-    if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js').catch(err => console.log(err));
-    });
-}
 </script>
 </body>
 </html>
